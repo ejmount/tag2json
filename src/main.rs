@@ -1,5 +1,6 @@
 use clap::*;
-use id3::Tag;
+use id3::frame::Picture;
+use id3::{Frame, Tag, TagLike};
 use json::JsonValue;
 use std::fs::File;
 use std::io::Write;
@@ -37,7 +38,7 @@ fn file_exists(path_str: &str) -> Result<PathBuf, String> {
 }
 
 /// Write the ID3 tags from the given file out as JSON. Also extract the album art to the given path if available
-pub fn extract_tags(
+fn extract_tags(
     id3_file: PathBuf,
     json_path: PathBuf,
     album_path: Option<PathBuf>,
@@ -51,6 +52,7 @@ pub fn extract_tags(
 
     let mut json = JsonValue::new_object();
 
+    // Get all the text tags
     for frame in tag.frames() {
         if let Some(text) = frame.content().text() {
             json[frame.id()] = JsonValue::String(text.to_owned());
@@ -86,11 +88,65 @@ pub fn extract_tags(
     Ok(())
 }
 
+fn apply_tags(
+    id3_file: PathBuf,
+    json_path: PathBuf,
+    album_path: Option<PathBuf>,
+) -> Result<(), String> {
+    let json = match std::fs::read_to_string(json_path) {
+        Ok(s) => s,
+        Err(e) => Err(format!("Unable to open json file: {e}"))?,
+    };
+    let json = match json::parse(&json) {
+        Ok(j) => j,
+        Err(e) => Err(format!("Unable to parse JSON: {e}"))?,
+    };
+
+    if !json.is_object() {
+        return Err(format!("No root object found"));
+    }
+
+    let mut tag = Tag::new();
+
+    for (key, val) in json.entries() {
+        if val.is_string() {
+            let frame = Frame::text(key, val.to_string());
+            tag.add_frame(frame);
+        }
+    }
+
+    if let Some(album_path) = album_path {
+        if album_path.exists() {
+            let data = match std::fs::read(&album_path) {
+                Ok(data) => data,
+                Err(e) => Err(format!("Cannot read album art data: {e}"))?,
+            };
+            let picture = Picture {
+                data,
+                description: "".to_owned(),
+                picture_type: id3::frame::PictureType::CoverFront,
+                mime_type: "image/jpeg".to_owned(),
+            };
+            tag.add_frame(picture);
+        } else {
+            return Err(format!(
+                "Provided album path does not exist: {}",
+                album_path.to_string_lossy()
+            ));
+        }
+    }
+
+    if let Err(e) = tag.write_to_path(id3_file, id3::Version::Id3v24) {
+        return Err(format!("Could not write tags: {e}"));
+    }
+    Ok(())
+}
+
 fn main() {
     let cli = Cli::parse();
     let result = match cli.mode {
         Mode::Extract => extract_tags(cli.id3, cli.json, cli.art),
-        Mode::Apply => unimplemented!(),
+        Mode::Apply => apply_tags(cli.id3, cli.json, cli.art),
     };
     if let Err(s) = result {
         eprintln!("Something went wrong: {s}");
